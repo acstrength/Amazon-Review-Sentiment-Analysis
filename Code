@@ -1,0 +1,143 @@
+## load libraries ##
+library(dplyr)
+library(jsonlite)
+library(lubridate)
+library(tidytext)
+library(textdata)
+library(caret)
+library(stopwords)
+library(tidyr)
+library(car)
+library(nnet)
+library(MASS)
+
+## load data set ##
+digital_music<-stream_in(file("C:/Users/akeem/Desktop/Data/Digital_Music.json"))
+
+## extract nested data frame ##
+digital_music$Format <- digital_music$style$`Format:`
+digital_music$Color <- digital_music$style$`Color:`
+digital_music$Size <- digital_music$style$`Size:`
+
+## remove unneeded columns ##
+digital_music<-digital_music%>%
+  select(-style,-reviewerID,-asin,-reviewerName,-unixReviewTime,-vote,-image,-Color,-Size)%>%
+  rename(Rating = overall,
+         Review = reviewText,
+         Summary = summary,
+         Date = reviewTime,
+         Verified = verified)
+
+## format date variable ##
+digital_music$Date<-mdy(digital_music$Date)
+digital_music$Date<-ymd(digital_music$Date)
+
+## add review_id ##
+digital_music<-digital_music%>%
+  mutate(review_id = row_number())
+
+### SENTIMENT ANALYSIS ###
+
+
+## load afinn lexicon ##
+afinn<-lexicon_afinn()
+
+## tokenize data set ##
+digital_music_tidy_afinn<-digital_music%>%
+  unnest_tokens(word,Review)
+
+## join afinn lexicon ##
+digital_music_tidy_afinn<-digital_music_tidy_afinn%>%
+  inner_join(afinn, by = c('word' = 'word'))
+
+## calculate sentiment scores ##
+digital_music_sentiment_afinn<-digital_music_tidy_afinn%>%
+  group_by(review_id)%>%
+  summarize(sentiment_score =sum(value,na.rm = TRUE))
+
+## classify sentiment ##
+digital_music_sentiment_afinn<-digital_music_sentiment_afinn%>%
+  mutate(sentiment_class = case_when(
+    sentiment_score > 0 ~ 'positive',
+    sentiment_score < 0 ~ 'negative',
+    TRUE ~ 'neutral'))
+
+## join variables to table ##
+digital_music_sentiment_afinn<-digital_music_sentiment_afinn%>%
+  left_join(digital_music %>% select(review_id, Review,Rating, Verified,Date, Format),
+            by = 'review_id')
+
+## check distribution of sentiment scores ##
+ggplot(digital_music_sentiment_afinn, aes(x = sentiment_class)) +
+  geom_bar(fill = "skyblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Sentiment Class Distribution", x = "Sentiment Class", y = "Count")
+table(digital_music_sentiment_afinn$sentiment_class)
+cat('There is an overwhelmingly more amount of positive reviews than there are neutral
+    or negative reviews. Negative = 58217, Neutral = 17741, and positive = 1117533')
+
+                      ## Logistic Regression ##
+
+
+## remove NA values
+digital_music_sentiment_afinn<-na.omit(digital_music_sentiment_afinn)
+
+## extract date components ##
+digital_music_sentiment_afinn$year<-year(digital_music_sentiment_afinn$Date)
+digital_music_sentiment_afinn$month<-month(digital_music_sentiment_afinn$Date)
+digital_music_sentiment_afinn$day<-day(digital_music_sentiment_afinn$Date)
+
+## change necessary data types to factor ##
+digital_music_sentiment_afinn$sentiment_class<-as.factor(digital_music_sentiment_afinn$sentiment_class)
+digital_music_sentiment_afinn$Rating<-as.factor(digital_music_sentiment_afinn$Rating)
+digital_music_sentiment_afinn$Verified<-as.factor(digital_music_sentiment_afinn$Verified)
+digital_music_sentiment_afinn$Format<-as.factor(digital_music_sentiment_afinn$Format)
+digital_music_sentiment_afinn$year<-as.factor(digital_music_sentiment_afinn$year)
+digital_music_sentiment_afinn$month<-as.factor(digital_music_sentiment_afinn$month)
+digital_music_sentiment_afinn$day<-as.factor(digital_music_sentiment_afinn$day)
+
+## remove neutral category ##
+digital_music_sentiment_afinn$binary_sentiment<-ifelse(digital_music_sentiment_afinn$sentiment_class
+                                                       == "positive", "positive", 
+                                                       "negative")
+cat('If the seniment is not positive, it will be counted as negative')
+
+## convert senntiment variable to binary ##
+digital_music_sentiment_afinn$binary_sentiment<-ifelse(digital_music_sentiment_afinn$sentiment_class
+                                                       == 'positive',1,0)
+
+
+## fit model ##
+
+#log_reg_model2<-glm(binary_sentiment ~ sentiment_score + year + month + day + 
+#                      Verified + Format
+#                    + Rating,
+#                    data = digital_music_sentiment_afinn,
+#                    family = binomial)
+
+summary(log_reg_model2)
+
+cat('The model with the sentiment_score variable included showed evidence of
+    overfitting. The sentiemnt_score variable correlates to highly with the
+    binary sentiment/response variable')
+
+## fit model without sentiment_score variable ##
+
+log_reg_model3<-glm(binary_sentiment ~ year + month + day + 
+                     Verified + Format
+                         + Rating,
+                         data = digital_music_sentiment_afinn,
+                    family = binomial)
+                   
+summary(log_reg_model3)
+
+cat('remvoing the sentiment_score variable produced a much more stable model')
+
+                          ## ORDINAL LOGISTIC REGRESSION
+
+ord_log_mod1<-polr(Rating ~ sentiment_score + binary_sentiment + year
+                   + month + day +Verified + Format,
+                   data = digital_music_sentiment_afinn,
+                   method = 'logistic')
+summary(ord_log_mod_1)
+
