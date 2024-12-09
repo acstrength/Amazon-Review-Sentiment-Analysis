@@ -1,0 +1,144 @@
+## load libraries ##
+library(dplyr)
+library(jsonlite)
+library(lubridate)
+library(tidytext)
+library(textdata)
+library(caret)
+library(stopwords)
+library(tidyr)
+library(ggplot2)
+library(pROC)
+
+## load data set ##
+digital_music<-stream_in(file("C:/Users/akeem/Desktop/Data/Digital_Music.json"))
+
+## extract nested data frame ##
+digital_music$Format <- digital_music$style$`Format:`
+digital_music$Color <- digital_music$style$`Color:`
+digital_music$Size <- digital_music$style$`Size:`
+
+## remove unneeded columns ##
+digital_music<-digital_music%>%
+  select(-style,-reviewerID,-asin,-reviewerName,-unixReviewTime,-vote,-image,-Color,-Size)%>%
+  rename(Rating = overall,
+         Review = reviewText,
+         Summary = summary,
+         Date = reviewTime,
+         Verified = verified)
+
+## format date variable ##
+digital_music$Date<-mdy(digital_music$Date)
+digital_music$Date<-ymd(digital_music$Date)
+
+## add review_id ##
+digital_music<-digital_music%>%
+  mutate(review_id = row_number())
+
+### SENTIMENT ANALYSIS ###
+
+
+## tokenize data set ##
+digital_music_tidy<-digital_music%>%
+  unnest_tokens(word,Review)
+
+## load Bing Liu Lexicon ##
+bing_liu_lexicon<-get_sentiments("bing")
+
+##join tokens with lexicon ##
+digital_music_sentiment<-digital_music_tidy%>%
+  inner_join(bing_liu_lexicon, by = "word")
+
+## calculate sentiment for each review ##
+digital_music_sentiment_summary<-digital_music_sentiment%>%
+  group_by(review_id)%>%
+  count(sentiment)%>%
+  spread(sentiment, n, fill = 0)%>%
+  mutate(sentiment_score = positive - negative)
+
+## add format column ##
+digital_music_sentiment_summary<- digital_music_sentiment_summary %>%
+  left_join(digital_music %>% select(Date,review_id, Format), by = "review_id")
+
+## assign sentiment label ##
+digital_music_sentiment_summary<-digital_music_sentiment_summary%>%
+  mutate(sentiment_label = ifelse(sentiment_score > 0, 'positive','negative'))
+
+## get number of each sentiemnt ##
+table(digital_music_sentiment_summary$sentiment_label)
+
+ggplot(digital_music_sentiment_summary, aes(x = sentiment_label)) +
+  geom_bar(fill = "skyblue", color = "black") +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+labs(title = "Sentiment Class Distribution", x = "Sentiment Class", y = "Count")
+
+
+## LOGISTIC REGRESSION
+
+## add predictor variables ##
+log_reg_data<-digital_music_sentiment_summary%>%
+  left_join(digital_music %>% select(review_id, Rating, Verified), by = "review_id")
+
+## remove NA values##
+log_reg_data<-na.omit(log_reg_data)
+
+## extract date components ##
+log_reg_data$year<-year(log_reg_data$Date)
+log_reg_data$month<-month(log_reg_data$Date)
+log_reg_data$day<-day(log_reg_data$Date)
+
+## change necessary data types to factor ##
+log_reg_data$sentiment_label<-as.factor(log_reg_data$sentiment_label)
+log_reg_data$Rating<-as.factor(log_reg_data$Rating)
+log_reg_data$Verified<-as.factor(log_reg_data$Verified)
+log_reg_data$Format<-as.factor(log_reg_data$Format)
+log_reg_data$year<-as.factor(log_reg_data$year)
+log_reg_data$month<-as.factor(log_reg_data$month)
+log_reg_data$day<-as.factor(log_reg_data$day)
+
+## fit model ##
+log_reg_model<-glm(sentiment_label ~ year + month + day + Verified + Format +
+                     Rating, 
+                   data = log_reg_data,
+                   family = 'binomial')
+
+summary(log_reg_model)
+
+## check for multicollinearity ##
+vif(log_reg_model)
+
+                    ## EVALUATE MODEL PERFORMANCE ##
+
+## make predictions ##
+log_reg_pred_prob<-predict(log_reg_model, newdata = log_reg_data, type = 'response')
+
+## convert probabilities to binary predictions ##
+log_reg_pred<-ifelse(log_reg_pred_prob > 0.5, 'positive','negative')
+log_reg_pred<-as.factor(log_reg_pred)
+
+## create confusion matrix ##
+bing_liu_conf_matrix<-confusionMatrix(log_reg_pred,log_reg_data$sentiment_label)
+print(bing_liu_conf_matrix)
+
+## create ROC Curve object
+roc_curve<-roc(log_reg_data$sentiment_label, log_reg_pred_prob)
+
+## plot the ROC curve ##
+plot(roc_curve, main = "ROC Curve", col = "blue", lwd = 2)
+
+# Calculate the AUC score
+auc_score <- round(auc(roc_curve), 2)
+text(x = 0.05, y = 0.95, labels = paste("AUC =", auc_score), col = "red", cex = 1.5, pos = 4)
+
+
+
+
+
+
+
+
+
+
+
+
