@@ -10,6 +10,8 @@ library(tidyr)
 library(car)
 library(nnet)
 library(MASS)
+library(car)
+library(pROC)
 
 ## load data set ##
 digital_music<-stream_in(file("C:/Users/akeem/Desktop/Data/Digital_Music.json"))
@@ -21,7 +23,7 @@ digital_music$Size <- digital_music$style$`Size:`
 
 ## remove unneeded columns ##
 digital_music<-digital_music%>%
-  select(-style,-reviewerID,-asin,-reviewerName,-unixReviewTime,-vote,-image,-Color,-Size)%>%
+  dplyr::select(-style,-reviewerID,-asin,-reviewerName,-unixReviewTime,-vote,-image,-Color,-Size)%>%
   rename(Rating = overall,
          Review = reviewText,
          Summary = summary,
@@ -37,7 +39,7 @@ digital_music<-digital_music%>%
   mutate(review_id = row_number())
 
 ### SENTIMENT ANALYSIS ###
-
+bing_liu<-get_sentiments('bing')
 
 ## load afinn lexicon ##
 afinn<-lexicon_afinn()
@@ -62,15 +64,18 @@ digital_music_sentiment_afinn<-digital_music_sentiment_afinn%>%
     sentiment_score < 0 ~ 'negative',
     TRUE ~ 'neutral'))
 
+table(digital_music_sentiment_afinn$sentiment_class)
+
 ## join variables to table ##
 digital_music_sentiment_afinn<-digital_music_sentiment_afinn%>%
-  left_join(digital_music %>% select(review_id, Review,Rating, Verified,Date, Format),
+  left_join(digital_music %>% dplyr::select(review_id, Review,Rating, Verified,Date, Format),
             by = 'review_id')
 
 ## check distribution of sentiment scores ##
 ggplot(digital_music_sentiment_afinn, aes(x = sentiment_class)) +
   geom_bar(fill = "skyblue", color = "black") +
   theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
   labs(title = "Sentiment Class Distribution", x = "Sentiment Class", y = "Count")
 table(digital_music_sentiment_afinn$sentiment_class)
 cat('There is an overwhelmingly more amount of positive reviews than there are neutral
@@ -80,6 +85,7 @@ cat('There is an overwhelmingly more amount of positive reviews than there are n
 
 
 ## remove NA values
+sum(is.na(digital_music_sentiment_afinn))
 digital_music_sentiment_afinn<-na.omit(digital_music_sentiment_afinn)
 
 ## extract date components ##
@@ -102,10 +108,11 @@ digital_music_sentiment_afinn$binary_sentiment<-ifelse(digital_music_sentiment_a
                                                        "negative")
 cat('If the seniment is not positive, it will be counted as negative')
 
-## convert senntiment variable to binary ##
+## convert sentiment variable to binary ##
 digital_music_sentiment_afinn$binary_sentiment<-ifelse(digital_music_sentiment_afinn$sentiment_class
                                                        == 'positive',1,0)
-
+## convert binary_sentiment to factor ##
+digital_music_sentiment_afinn$binary_sentiment<-as.factor(digital_music_sentiment_afinn$binary_sentiment)
 
 ## fit model ##
 
@@ -113,31 +120,64 @@ digital_music_sentiment_afinn$binary_sentiment<-ifelse(digital_music_sentiment_a
 #                      Verified + Format
 #                    + Rating,
 #                    data = digital_music_sentiment_afinn,
-#                    family = binomial)
+#                   family = binomial)
 
-summary(log_reg_model2)
+#summary(log_reg_model2)
+
 
 cat('The model with the sentiment_score variable included showed evidence of
     overfitting. The sentiemnt_score variable correlates to highly with the
     binary sentiment/response variable')
 
+## check to see how well binary_sentiemnt and sentiment_score correlate ## 
+#log_reg_model_test <- glm(binary_sentiment ~ sentiment_score,
+#                     data = digital_music_sentiment_afinn,
+#                    family = binomial)
+
+
 ## fit model without sentiment_score variable ##
 
-log_reg_model3<-glm(binary_sentiment ~ year + month + day + 
-                     Verified + Format
-                         + Rating,
+log_reg_model3<-glm(binary_sentiment ~ year + month + day +
+                     Verified + Format + Rating,
                          data = digital_music_sentiment_afinn,
                     family = binomial)
                    
 summary(log_reg_model3)
 
-cat('remvoing the sentiment_score variable produced a much more stable model')
+## check for multicollinearity ##
+vif(log_reg_model3)
+
+                ## EVALUATE MODEL PERFORMANCE ##
+
+## make predictions ##
+log_reg_pred_prob_afinn<-predict(log_reg_model3, newdata = digital_music_sentiment_afinn, type = 'response')
+
+## convert probabilities to binary predictions ##
+log_reg_pred_afinn<-ifelse(log_reg_pred_prob_afinn > 0.5, 1,0)
+log_reg_pred_afinn<-as.factor(log_reg_pred_afinn)
+
+## create confusion matrix ##
+afinn_conf_matrix<-confusionMatrix(log_reg_pred_afinn,digital_music_sentiment_afinn$binary_sentiment)
+print(afinn_conf_matrix)
+
+## create ROC curve object ##
+roc_curve_afinn<-roc(digital_music_sentiment_afinn$binary_sentiment, log_reg_pred_prob_afinn)
+
+## plot the ROC curve ##
+plot(roc_curve_afinn, main = "ROC Curve", col = "blue", lwd = 2)
+
+# Calculate the AUC score
+auc_score <- round(auc(roc_curve_afinn), 2)
+text(x = 0.05, y = 0.95, labels = paste("AUC =", auc_score), col = "red", cex = 1.5, pos = 4)
 
                           ## ORDINAL LOGISTIC REGRESSION
 
-ord_log_mod1<-polr(Rating ~ sentiment_score + binary_sentiment + year
-                   + month + day +Verified + Format,
+ord_log_mod1<-polr(Rating ~  binary_sentiment +
+                    month + Verified,
                    data = digital_music_sentiment_afinn,
                    method = 'logistic')
-summary(ord_log_mod_1)
+summary(ord_log_mod1)
+
+## check for multicollinearity ##
+vif(ord_log_mod1)
 
